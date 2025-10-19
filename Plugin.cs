@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using BepInEx;
 using BepInEx.Logging;
+using BepInEx.Configuration;
 using HarmonyLib;
 using TerminalApi;
 using TerminalApi.Classes;
@@ -22,20 +23,108 @@ namespace ShipItemsCommand
         internal static ManualLogSource Log;
         internal static Harmony Harmony;
 
+        internal static ConfigEntry<string> SortModeCfg;   // By "name" or "count"
+        internal static ConfigEntry<bool> SortDescCfg;   // true = DESC, false = ASC
+
         private void Awake()
         {
             Log = Logger;
             Harmony = new Harmony(PluginGuid);
 
+            // --- Config ---
+            SortModeCfg = Config.Bind("Sorting", "Mode", "name",
+                "Shipitems sorting mode: 'name' or 'count'.");
+            SortDescCfg = Config.Bind("Sorting", "Descending", false,
+                "Shipitems sort direction: true=DESC, false=ASC.");
+
+            // --- Main list command ---
             TerminalApi.TerminalApi.AddCommand("shipitems", new CommandInfo
             {
                 Title = "Ship Items",
                 Category = "Other",
-                Description = "Lists all sellable items currently inside the ship and shows the total value.",
+                Description = "Lists all sellable items in the ship with current sort settings.",
                 DisplayTextSupplier = ShipItemScanner.BuildShipItemsText
             });
 
-            Log.LogInfo($"{PluginName} {PluginVersion} loaded and command 'shipitems' registered.");
+            // ---------- SORT MODE TOGGLE ----------
+            TerminalApi.TerminalApi.AddCommand("shipitems s", new CommandInfo
+            {
+                Title = "Ship Items: Sort Mode (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting between NAME and COUNT.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortMode
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems sort", new CommandInfo
+            {
+                Title = "Ship Items: Sort Mode (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting between NAME and COUNT.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortMode
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems mode", new CommandInfo
+            {
+                Title = "Ship Items: Sort Mode (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting between NAME and COUNT.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortMode
+            });
+
+            // explicit setters (mode)
+            TerminalApi.TerminalApi.AddCommand("shipitems name", new CommandInfo
+            {
+                Title = "Ship Items: Sort Mode = NAME",
+                Category = "Other",
+                Description = "Set sorting mode to NAME.",
+                DisplayTextSupplier = ShipItemScanner.SetSortModeName
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems count", new CommandInfo
+            {
+                Title = "Ship Items: Sort Mode = COUNT",
+                Category = "Other",
+                Description = "Set sorting mode to COUNT.",
+                DisplayTextSupplier = ShipItemScanner.SetSortModeCount
+            });
+
+            // ---------- SORT DIRECTION TOGGLE ----------
+            TerminalApi.TerminalApi.AddCommand("shipitems d", new CommandInfo
+            {
+                Title = "Ship Items: Sort Direction (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting direction between ASC and DESC.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortDirection
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems dir", new CommandInfo
+            {
+                Title = "Ship Items: Sort Direction (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting direction between ASC and DESC.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortDirection
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems direction", new CommandInfo
+            {
+                Title = "Ship Items: Sort Direction (toggle)",
+                Category = "Other",
+                Description = "Toggle sorting direction between ASC and DESC.",
+                DisplayTextSupplier = ShipItemScanner.ToggleSortDirection
+            });
+
+            // explicit setters (direction)
+            TerminalApi.TerminalApi.AddCommand("shipitems asc", new CommandInfo
+            {
+                Title = "Ship Items: Sort Dir = ASC",
+                Category = "Other",
+                Description = "Set sorting direction to ASC.",
+                DisplayTextSupplier = ShipItemScanner.SetSortAsc
+            });
+            TerminalApi.TerminalApi.AddCommand("shipitems desc", new CommandInfo
+            {
+                Title = "Ship Items: Sort Dir = DESC",
+                Category = "Other",
+                Description = "Set sorting direction to DESC.",
+                DisplayTextSupplier = ShipItemScanner.SetSortDesc
+            });
+
+            Log.LogInfo($"{PluginName} {PluginVersion} loaded and all commands registered.");
         }
     }
 
@@ -260,27 +349,55 @@ namespace ShipItemsCommand
                 {
                     var it = items[i];
                     if (string.IsNullOrEmpty(it.Name)) continue;
-                    if (!counts.ContainsKey(it.Name))
-                        counts[it.Name] = 1;
-                    else
-                        counts[it.Name]++;
+                    int c;
+                    if (!counts.TryGetValue(it.Name, out c)) counts[it.Name] = 1;
+                    else counts[it.Name] = c + 1;
                 }
 
-                // Sort alphabetically by name
-                var sorted = new List<string>(counts.Keys);
-                sorted.Sort(StringComparer.OrdinalIgnoreCase);
+                // Turn into a list for sorting
+                var pairs = new List<KeyValuePair<string, int>>(counts);
+                bool desc = Plugin.SortDescCfg.Value;
+                string mode = Plugin.SortModeCfg.Value;
 
-                // Build the output text
+                // Normalize mode
+                if (string.IsNullOrEmpty(mode)) mode = "name";
+                mode = mode.ToLowerInvariant();
+
+                if (mode == "count")
+                {
+                    // Sort by amount (then name)
+                    pairs.Sort(delegate (KeyValuePair<string, int> a, KeyValuePair<string, int> b)
+                    {
+                        int cmp = a.Value.CompareTo(b.Value);   // ASC
+                        if (desc) cmp = -cmp;                   // flip for DESC
+                        if (cmp != 0) return cmp;
+
+                        // Tie-breaker by name (always ASC for stability)
+                        return string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase);
+                    });
+                }
+                else // "name"
+                {
+                    pairs.Sort(delegate (KeyValuePair<string, int> a, KeyValuePair<string, int> b)
+                    {
+                        int cmp = string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase); // ASC
+                        if (desc) cmp = -cmp;                                                      // flip for DESC
+                        return cmp;
+                    });
+                }
+
+                // Build output
                 var sb = new StringBuilder();
                 sb.AppendLine("\n— Ship Items —");
+                sb.AppendFormat("Mode: {0} | Dir: {1}\n", mode.ToUpperInvariant(), desc ? "DESC" : "ASC");
                 sb.AppendLine("Name                Amount");
                 sb.AppendLine("----------------------------");
 
                 int total = 0;
-                for (int i = 0; i < sorted.Count; i++)
+                for (int i = 0; i < pairs.Count; i++)
                 {
-                    string name = sorted[i];
-                    int count = counts[name];
+                    string name = pairs[i].Key;
+                    int count = pairs[i].Value;
                     total += count;
                     sb.AppendFormat("{0,-20} x {1}\n", name, count);
                 }
@@ -295,5 +412,46 @@ namespace ShipItemsCommand
                 return "\nShipItems: An error occurred. Check the log.\n\n";
             }
         }
+
+        public static string ToggleSortMode()
+        {
+            string cur = Plugin.SortModeCfg.Value;
+            string next = (string.Compare(cur, "name", StringComparison.OrdinalIgnoreCase) == 0)
+                ? "count" : "name";
+            Plugin.SortModeCfg.Value = next;
+            return "\nShipItems: Sort mode set to " + next.ToUpperInvariant() + ".\n\n";
+        }
+
+        public static string ToggleSortDirection()
+        {
+            bool next = !Plugin.SortDescCfg.Value;
+            Plugin.SortDescCfg.Value = next;
+            return "\nShipItems: Sort direction set to " + (next ? "DESC" : "ASC") + ".\n\n";
+        }
+
+        public static string SetSortModeName()
+        {
+            Plugin.SortModeCfg.Value = "name";
+            return "\nShipItems: Sort mode set to NAME.\n\n";
+        }
+
+        public static string SetSortModeCount()
+        {
+            Plugin.SortModeCfg.Value = "count";
+            return "\nShipItems: Sort mode set to COUNT.\n\n";
+        }
+
+        public static string SetSortAsc()
+        {
+            Plugin.SortDescCfg.Value = false;
+            return "\nShipItems: Sort direction set to ASC.\n\n";
+        }
+
+        public static string SetSortDesc()
+        {
+            Plugin.SortDescCfg.Value = true;
+            return "\nShipItems: Sort direction set to DESC.\n\n";
+        }
+
     }
 }
